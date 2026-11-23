@@ -36,8 +36,13 @@ def load(path, skip):
     t = (d[:, 0] - d[0, 0]) / 1000.0
     keep = t >= skip
     d, t = d[keep], t[keep] - t[keep][0]
-    ok = ~np.isnan(d[:, 2:8]).any(axis=1)
-    return t[ok], d[ok, 2:5], d[ok, 5:8]
+    ok_a = ~np.isnan(d[:, 2:5]).any(axis=1)
+    ok_b = ~np.isnan(d[:, 5:8]).any(axis=1)
+    have_b = ok_b.mean() > 0.5                          # B mostly missing: report A alone
+    ok = ok_a & ok_b if have_b else ok_a
+    if ok.sum() < 50:
+        sys.exit(f"{path}: fewer than 50 usable readings")
+    return t[ok] - t[ok][0], d[ok, 2:5], (d[ok, 5:8] if have_b else None), ok_b.mean()
 
 
 def block_std(x, n):
@@ -68,19 +73,24 @@ def main():
     ap.add_argument("--no-show", action="store_true", help="only save the picture")
     args = ap.parse_args()
 
-    t, A, B = load(args.csv, args.skip)
+    t, A, B, b_frac = load(args.csv, args.skip)
     fs = len(t) / t[-1]
-    D = A - B
-    chans = {"A x": A[:, 0], "A y": A[:, 1], "A z": A[:, 2], "|A|": np.linalg.norm(A, axis=1),
-             "B x": B[:, 0], "B y": B[:, 1], "B z": B[:, 2], "|B|": np.linalg.norm(B, axis=1),
-             "A-B x": D[:, 0], "A-B y": D[:, 1], "A-B z": D[:, 2]}
-    new_b = np.r_[True, np.any(np.diff(B, axis=0) != 0, axis=1)].sum() / t[-1]
-    steps = np.diff(np.unique(B[:, 0]))
-    bstep = np.median(steps[steps > 0]) if (steps > 0).any() else np.nan
-
+    chans = {"A x": A[:, 0], "A y": A[:, 1], "A z": A[:, 2], "|A|": np.linalg.norm(A, axis=1)}
     print(f"\n{args.csv}: {len(t)} readings over {t[-1] / 60:.1f} min ({fs:.1f} per second)")
-    print(f"A = MPU9250 (each reading = average over 50 ms). B = BNO055: {new_b:.1f} new values per second,"
-          f" steps of {bstep:.3f} uT.")
+    if B is None:
+        print(f"\n  !! B (BNO055) gave no real values ({b_frac * 100:.0f}% usable: all zeros or nan).")
+        print("  !! It has stopped or restarted itself. Press EN on the board and check B's VIN and GND wires.")
+        print("  !! Below: A only.\n")
+        print("A = MPU9250 (each reading = average over 50 ms).")
+    else:
+        D = A - B
+        chans.update({"B x": B[:, 0], "B y": B[:, 1], "B z": B[:, 2], "|B|": np.linalg.norm(B, axis=1),
+                      "A-B x": D[:, 0], "A-B y": D[:, 1], "A-B z": D[:, 2]})
+        new_b = np.r_[True, np.any(np.diff(B, axis=0) != 0, axis=1)].sum() / t[-1]
+        steps = np.diff(np.unique(B[:, 0]))
+        bstep = np.median(steps[steps > 0]) if (steps > 0).any() else np.nan
+        print(f"A = MPU9250 (each reading = average over 50 ms). B = BNO055: {new_b:.1f} new values per second,"
+              f" steps of {bstep:.3f} uT.")
     print("Noise = standard deviation (SD) of the readings while nothing moves. Units: uT.\n")
 
     rows = []
@@ -117,12 +127,17 @@ def main():
     print("-" * 7 + "+" + "-" * 11 + "+" + "-" * 10 + "+")
     pulse = {}
     for n in ("A x", "A y", "A z", "B x", "B y", "B z"):
+        if n not in chans:
+            continue
         p, s = slow_pulse(chans[n], fs)
         pulse[n] = s
         print(f"{n:<7}|{p:>10.1f} |{s:>9.3f} |")
-    worst = max(("B x", "B y", "B z"), key=lambda k: pulse[k])
     a_ref = np.mean([pulse["A x"], pulse["A y"], pulse["A z"]])
-    if pulse[worst] > max(0.15, 2.5 * a_ref):
+    worst = max(("B x", "B y", "B z"), key=lambda k: pulse[k]) if B is not None else None
+    if worst is None:
+        print("  -> B has no data, so B's pulse can't be checked." if a_ref <= 0.15
+              else f"  -> A shows a slow rhythm ({a_ref:.2f} uT).")
+    elif pulse[worst] > max(0.15, 2.5 * a_ref):
         print(f"  -> B has a slow repeating pulse (biggest on {worst}, {pulse[worst]:.2f} uT). A does not.")
         print("     Likely mains interference (chargers, PC power supply, power strips). Try moving away.")
     else:
@@ -146,7 +161,10 @@ def main():
     fig = plt.figure(figsize=(12, 8))
     for k, ax_name in enumerate("xyz"):
         ax = fig.add_subplot(2, 3, k + 1)
-        for x, col, lab in ((chans[f"A {ax_name}"], "#2a78d6", "A"), (chans[f"B {ax_name}"], "#eb6834", "B")):
+        for lab, col in (("A", "#2a78d6"), ("B", "#eb6834")):
+            if f"{lab} {ax_name}" not in chans:
+                continue
+            x = chans[f"{lab} {ax_name}"]
             dev = x - x.mean()
             ax.hist(dev, bins=np.arange(-3.0, 3.01, 0.375), histtype="step", lw=1.6, color=col,
                     label=f"{lab} {ax_name}: SD {x.std(ddof=1):.2f} uT")
@@ -156,11 +174,12 @@ def main():
         ax.grid(alpha=0.3)
     ax = fig.add_subplot(2, 1, 2)
     secs = np.array([0.05, 0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15])
-    for n, col in (("A-B x", "#2a78d6"), ("A-B y", "#1baf7a"), ("A-B z", "#eb6834")):
+    pre = "A-B" if B is not None else "A"
+    for n, col in ((f"{pre} x", "#2a78d6"), (f"{pre} y", "#1baf7a"), (f"{pre} z", "#eb6834")):
         ax.loglog(secs, [block_std(chans[n], max(1, int(round(s * fs)))) for s in secs], "o-", color=col, label=n)
-    sd0 = chans["A-B x"].std(ddof=1)
+    sd0 = chans[f"{pre} x"].std(ddof=1)
     ax.loglog(secs, sd0 / np.sqrt(secs / secs[0]), "k:", lw=1, label="purely random noise would follow this")
-    ax.set_title("SD of A - B after averaging: how long to hold still at each map point", fontsize=10)
+    ax.set_title(f"SD of {pre} after averaging: how long to hold still at each map point", fontsize=10)
     ax.set_xlabel("averaging time, s")
     ax.set_ylabel("SD, uT")
     ax.grid(alpha=0.3, which="both")

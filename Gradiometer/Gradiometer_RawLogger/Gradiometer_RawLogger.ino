@@ -116,6 +116,7 @@ float    mpuSum[3] = { 0, 0, 0 };        // MPU readings collected since the las
 int      mpuN = 0;
 uint32_t lastSample = 0;
 uint32_t bErrors = 0;
+uint32_t bZeroRows = 0, bRestarts = 0, lastBFix = 0;   // BNO055 restarted itself: all values exactly 0
 
 int   point = 0;                         // point number, changed by the button or 'n'
 bool  buttonWasDown = false;
@@ -207,6 +208,7 @@ void printHelp() {
 void printTableHeader() {
   out.println();
   if (bErrors) out.printf("(BNO055 read errors so far: %lu)\n", (unsigned long)bErrors);
+  if (bRestarts) out.printf("(BNO055 restarted by itself %lu times: check its VIN and GND wires)\n", (unsigned long)bRestarts);
   out.printf("%8s |%6s |%8s%8s%8s%8s |%8s%8s%8s%8s\n",
                 "time s", "point", "A x", "A y", "A z", "|A|", "B x", "B y", "B z", "|B|");
   dashes(9); out.print('+'); dashes(7); out.print('+'); dashes(33); out.print('+'); dashes(32);
@@ -504,6 +506,21 @@ void loop() {
   if (haveB) {
     okB = readB(b);
     if (!okB) { bErrors++; b[0] = b[1] = b[2] = NAN; }
+    else if (b[0] == 0 && b[1] == 0 && b[2] == 0) {   // Earth's field is never exactly 0:
+      okB = false;                                      // the BNO055 restarted (power dip or
+      b[0] = b[1] = b[2] = NAN;                         // loose wire) and waits in CONFIG mode
+      if (++bZeroRows >= 5 && now - lastBFix > 2000) {
+        lastBFix = now;
+        bZeroRows = 0;
+        bRestarts++;
+        bno->setExtCrystalUse(true);                    // back to MAGONLY mode (about 0.1 s)
+        prefix();
+        out.printf("B (BNO055) restarted by itself - set up again (%lu so far). Check its VIN and GND wires.\n",
+                   (unsigned long)bRestarts);
+      }
+    } else {
+      bZeroRows = 0;
+    }
   }
   handleRow(now, okA, a, okB, b);
 }
