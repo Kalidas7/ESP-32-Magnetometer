@@ -57,14 +57,14 @@ The PC that records does not need the Arduino IDE. It needs Python:
   (if your terminal shows `(base)`, type `conda deactivate` first)
 
 Connect the PC to the ESP32 by **USB** (port `COM5` on Windows, `/dev/ttyUSB0` on Linux) or by **WiFi**
-(the PC on the same WiFi or hotspot, using the IP address the board prints at start-up).
+(the PC joined to the same hotspot; write `wifi` instead of a port and the logger finds the board itself).
 Open a terminal in the `tools` folder and run the commands below.
 For USB, close the Arduino Serial Monitor first.
 
 | Job | Windows | Linux |
 |---|---|---|
 | Record over USB | `python log_serial.py COM5 quiet.csv --minutes 2` | `python3 log_serial.py /dev/ttyUSB0 quiet.csv --minutes 2` |
-| Record over WiFi | `python log_serial.py 172.20.10.5 scan.csv` | `python3 log_serial.py 172.20.10.5 scan.csv` |
+| Record over WiFi | `python log_serial.py wifi scan.csv` | `python3 log_serial.py wifi scan.csv` |
 | Plot a recording | `python plot_log.py quiet.csv` | `python3 plot_log.py quiet.csv` |
 | Noise report | `python noise_report.py quiet.csv` | `python3 noise_report.py quiet.csv` |
 | Calibrate | `python calibrate.py calib.csv --field 41.8` | `python3 calibrate.py calib.csv --field 41.8` |
@@ -107,5 +107,23 @@ Record 2 minutes while turning the stick slowly through every direction, away fr
   (the ESP32 only works on 2.4 GHz). Keep that screen open while the ESP32 starts.
 - The board tries for 10 s at start-up. If it can't connect, WiFi is switched off and USB is used.
   USB always works as well.
-- `gradiometer.local` may work instead of the IP address.
+- `wifi` as the port makes the logger search the hotspot for the board. You can also give the address
+  the board prints at start-up (for example `172.20.10.3`) or `gradiometer.local`.
+- The board only looks for WiFi when it starts: turn the hotspot on first, then press EN.
 - WiFi draws current in bursts that the sensors can feel. Measure the noise with WiFi on before trusting maps.
+
+## 7. Test: where does B's 5-second pulse come from?
+
+Three 2-minute recordings on the laptop. Keep everything still; keep the phone 1 m from the board.
+
+| # | File | Setup | Command (Windows) |
+|---|---|---|---|
+| 1 | `near_usb.csv` | Board on the laptop's USB, next to the desktop PC and power strips. Hotspot OFF, press EN. | `python log_serial.py COM5 near_usb.csv --minutes 2` |
+| 2 | `near_wifi.csv` | Same place. Hotspot ON, laptop joined to it, press EN, wait 15 s. | `python log_serial.py wifi near_wifi.csv --minutes 2` |
+| 3 | `far_wifi.csv` | Board on a power bank, 2 m or more from the PC, monitor, power strips and the laptop's charger. Laptop on battery. | `python log_serial.py wifi far_wifi.csv --minutes 2` |
+
+Then `python noise_report.py near_usb.csv` (and the other two). Section 4 says whether B's pulse is there.
+
+- 2 worse than 1: the WiFi radio adds noise.
+- Pulse gone in 3: the PC or mains wiring causes it.
+- Pulse still there in 3: it comes from inside the BNO055.

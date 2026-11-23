@@ -4,8 +4,8 @@ log_serial.py - save the ESP32 raw logger's data to a CSV file on the laptop.
 
     python3 log_serial.py /dev/ttyUSB0 warmup.csv --minutes 15     (USB, Ubuntu)
     python log_serial.py COM5 calib.csv --minutes 2                 (USB, Windows)
-    python3 log_serial.py gradiometer.local scan.csv                (WiFi)
-    python3 log_serial.py 192.168.1.23 scan.csv                     (WiFi, using the IP the board printed)
+    python log_serial.py wifi scan.csv --minutes 2                  (WiFi: finds the board by itself)
+    python3 log_serial.py 172.20.10.3 scan.csv                      (WiFi, using the IP the board printed)
 
 It switches the sketch to CSV mode, saves every data line, shows a live progress line,
 and stops after --minutes (or when you press Ctrl+C). At the end it switches the sketch
@@ -26,9 +26,9 @@ TCP_PORT = 3333
 class TcpLink:
     """WiFi connection to the board, used like a serial port (readline / write)."""
 
-    def __init__(self, host, port):
+    def __init__(self, host, port, sock=None):
         self.host, self.port, self.buf = host, port, b""
-        self.s = socket.create_connection((host, port), timeout=5)
+        self.s = sock or socket.create_connection((host, port), timeout=5)
         self.s.settimeout(0.5)
 
     def readline(self):
@@ -58,6 +58,59 @@ class TcpLink:
 
     def close(self):
         self.s.close()
+
+
+def local_ipv4s():
+    """This laptop's own addresses on WiFi / LAN."""
+    ips = set()
+    for target in ("8.8.8.8", "172.20.10.1"):
+        try:
+            u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            u.connect((target, 80))               # sends nothing; just picks the network's address
+            ips.add(u.getsockname()[0])
+            u.close()
+        except OSError:
+            pass
+    try:
+        ips.update(socket.gethostbyname_ex(socket.gethostname())[2])
+    except OSError:
+        pass
+    return sorted(ip for ip in ips if not ip.startswith(("127.", "169.254.", "0.")))
+
+
+def find_board(port=TCP_PORT):
+    """Find the board on the laptop's WiFi: try gradiometer.local, then knock on every address."""
+    from concurrent.futures import ThreadPoolExecutor
+    print("Looking for the board on WiFi...")
+    try:
+        return "gradiometer.local", socket.create_connection(("gradiometer.local", port), timeout=2)
+    except OSError:
+        pass
+    mine = local_ipv4s()
+    hosts = []
+    for ip in mine:
+        base = ip.rsplit(".", 1)[0]
+        hosts += [f"{base}.{i}" for i in range(1, 255) if f"{base}.{i}" != ip and f"{base}.{i}" not in hosts]
+
+    def knock(h):
+        try:
+            return h, socket.create_connection((h, port), timeout=0.6)
+        except OSError:
+            return h, None
+
+    found = None
+    with ThreadPoolExecutor(64) as ex:
+        for h, sk in ex.map(knock, hosts):
+            if sk is not None and found is None:
+                found = (h, sk)
+            elif sk is not None:
+                sk.close()
+    if found is None:
+        sys.exit("Board not found on WiFi. Check:\n"
+                 f"  - this laptop is on the board's WiFi (laptop addresses: {', '.join(mine) or 'none'})\n"
+                 "  - the hotspot was on BEFORE the board started (press EN on the board, wait 15 s)\n"
+                 "  - iPhone: Personal Hotspot ON and Maximize Compatibility ON")
+    return found
 
 
 def is_usb(port):
@@ -100,7 +153,7 @@ def parse_row(line):
 
 def main():
     ap = argparse.ArgumentParser(description="Save the ESP32 raw logger's data to a CSV file.")
-    ap.add_argument("port", help="USB port (COM5, /dev/ttyUSB0) or WiFi address (gradiometer.local, 192.168.1.23)")
+    ap.add_argument("port", help="USB port (COM5, /dev/ttyUSB0), or 'wifi' to find the board, or its WiFi address (172.20.10.3)")
     ap.add_argument("outfile", help="CSV file to write, e.g. calib.csv")
     ap.add_argument("--minutes", type=float, default=0, help="stop after this many minutes (0 = until Ctrl+C)")
     ap.add_argument("--baud", type=int, default=115200)
@@ -109,7 +162,12 @@ def main():
     wifi = not is_usb(args.port)
     host, _, p = args.port.partition(":")
     tcp_port = int(p) if p else TCP_PORT
-    if wifi:
+    if wifi and host.lower() == "wifi":
+        host, sock = find_board(tcp_port)
+        ser = TcpLink(host, tcp_port, sock)
+        print(f"Found the board at {host} over WiFi.")
+        time.sleep(0.5)
+    elif wifi:
         try:
             ser = TcpLink(host, tcp_port)
         except OSError as e:
