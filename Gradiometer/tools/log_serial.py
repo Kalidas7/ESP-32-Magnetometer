@@ -185,6 +185,7 @@ def main():
 
     rows, skipped, t0, last_show = 0, 0, time.time(), 0.0
     last_ask, got_bytes, shown_other, warned = t0, False, 0, False
+    garbled, garble_warned = 0, False
     stop_at = t0 + args.minutes * 60 if args.minutes > 0 else None
     print(f"Saving to {args.outfile}. " + (f"Stops after {args.minutes:g} min." if stop_at else "Press Ctrl+C to stop."))
 
@@ -211,6 +212,8 @@ def main():
                 now = time.time()
                 got_bytes = got_bytes or bool(raw)
                 if rows == 0 and now - last_ask > 2:     # no data yet: ask for CSV mode again
+                    if not wifi:
+                        ser.baudrate = args.baud         # put the speed back in case another program changed it
                     ser.write(b"c\n")
                     last_ask = now
                     if not got_bytes and now - t0 > 6 and not warned:
@@ -221,6 +224,16 @@ def main():
                         print("   - press the EN (reset) button on the ESP32 once")
                 line = raw.decode("ascii", errors="replace").strip()
                 if not line:
+                    continue
+                if not wifi and sum(ch == "\ufffd" or (ord(ch) < 32 and ch != "\t") for ch in line) > len(line) // 4:
+                    garbled += 1
+                    if garbled >= 3 and not garble_warned:
+                        garble_warned = True
+                        print("\n  The text from the board is garbled: another program is changing the USB port's speed.")
+                        print("  On Ubuntu this is usually ModemManager. Press Ctrl+C, then run:")
+                        print("     sudo systemctl stop ModemManager")
+                        print("     sudo fuser -v " + args.port + "      (should print nothing)")
+                        print("  unplug and replug the board, wait 5 s, and start this again.")
                     continue
                 if line.startswith("#"):         # messages from the sketch, e.g. point changes
                     print("\n  ESP32:", line[1:].strip())
